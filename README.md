@@ -9,7 +9,7 @@ Proyek UAS ini merupakan aplikasi chatbot berbasis suara yang memungkinkan pengg
 - 🧪 Antarmuka pengguna interaktif berbasis `Gradio` untuk pengujian langsung dari browser.
 
 ## 🗂️ Struktur Proyek
-
+```
 voice_chatbot_project/
 │
 ├── app/
@@ -25,6 +25,7 @@ voice_chatbot_project/
 │
 ├── .env                   # Menyimpan Gemini API Key
 ├── requirements.txt       # Daftar dependensi Python
+```
 
 ## 📚 Catatan
 - Semua file audio menggunakan format `.wav`.
