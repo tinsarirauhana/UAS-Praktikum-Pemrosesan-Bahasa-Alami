@@ -1,4 +1,5 @@
 import os
+import time
 from google import genai
 from google.genai import types
 from pydantic import TypeAdapter
@@ -6,17 +7,32 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-MODEL = "gemini-2.0-flash"
+MODEL = "models/gemma-4-26b-a4b-it"
 
-# TODO: Ambil API key dari file .env
-# Gunakan os.getenv("NAMA_ENV_VARIABLE") untuk mengambil API Key dari file .env.
-# Pastikan di file .env terdapat baris: GEMINI_API_KEY=your_api_key
-GOOGLE_API_KEY = ...
+# Kumpulkan semua API key dari .env (auto-rotate jika rate limit)
+def _load_api_keys():
+    keys = []
+    # Key utama
+    k = os.getenv("GEMINI_API_KEY")
+    if k:
+        keys.append(k)
+    # Key tambahan GEMINI_API_KEY_1 dst
+    i = 1
+    while True:
+        k = os.getenv(f"GEMINI_API_KEY_{i}")
+        if not k:
+            break
+        keys.append(k)
+        i += 1
+    return keys
+
+API_KEYS = _load_api_keys()
+current_key_index = 0
+print(f"[LLM] Loaded {len(API_KEYS)} API key(s)")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CHAT_HISTORY_FILE = os.path.join(BASE_DIR, "chat_history.json")
 
-# Prompt sistem yang digunakan untuk membimbing gaya respons LLM
 system_instruction = """
 You are a responsive, intelligent, and fluent virtual assistant who communicates in Indonesian.
 Your task is to provide clear, concise, and informative answers in response to user queries or statements spoken through voice.
@@ -31,57 +47,42 @@ User: Cuaca hari ini gimana?
 Assistant: Hari ini cuacanya cerah di sebagian besar wilayah, dengan suhu sekitar 30 derajat.
 
 User: Kamu tahu siapa presiden Indonesia?
-Assistant: Presiden Indonesia saat ini adalah Joko Widodo.
+Assistant: Presiden Indonesia saat ini adalah Prabowo Subianto.
 
 If you're unsure about an answer, be honest and say that you don't know.
 """
 
-# TODO: Inisialisasi klien Gemini dan konfigurasi prompt
-# Gunakan genai.Client(api_key=...) untuk membuat klien.
-# Gunakan types.GenerateContentConfig(system_instruction=...) untuk membuat konfigurasi awal.
-# Jika ingin melihat contoh implementasi, baca dokumentasi resmi Gemini:
-# https://github.com/google-gemini/cookbook/blob/main/quickstarts/Get_started.ipynb
-client = ...
-chat_config = ...
+chat_config = types.GenerateContentConfig(system_instruction=system_instruction)
 history_adapter = TypeAdapter(list[types.Content])
 
-# Fungsi untuk menyimpan/memuat riwayat chat
-def export_chat_history(chat) -> str:
-    return history_adapter.dump_json(chat.get_history()).decode("utf-8")
+def _make_client(key_index: int):
+    return genai.Client(api_key=API_KEYS[key_index])
 
-def save_chat_history(chat):
-    json_history = export_chat_history(chat)
-    with open(CHAT_HISTORY_FILE, "w", encoding="utf-8") as f:
-        f.write(json_history)
+def _make_chat(client):
+    return client.chats.create(model=MODEL, config=chat_config)
 
-def load_chat_history():
-    if not os.path.exists(CHAT_HISTORY_FILE):
-        return client.chats.create(model=MODEL, config=chat_config)
-    
-    if os.path.getsize(CHAT_HISTORY_FILE) == 0:
-        return client.chats.create(model=MODEL, config=chat_config)
+# Inisialisasi client dan chat dengan key pertama
+client = _make_client(current_key_index)
+chat = _make_chat(client)
 
-    with open(CHAT_HISTORY_FILE, "r", encoding="utf-8") as f:
-        json_str = f.read().strip()
-
-    if not json_str:
-        return client.chats.create(model=MODEL, config=chat_config)
-
-    try:
-        history = history_adapter.validate_json(json_str)
-        return client.chats.create(model=MODEL, config=chat_config, history=history)
-    except Exception as e:
-        print(f"[ERROR] Gagal load history chat: {e}")
-        return client.chats.create(model=MODEL, config=chat_config)
-
-# Inisialisasi sesi chat saat aplikasi dimulai
-chat = load_chat_history()
-
-# Kirim prompt ke LLM dan kembalikan respons teks
 def generate_response(prompt: str) -> str:
-    try:
-        response = chat.send_message(prompt)
-        save_chat_history(chat)
-        return response.text.strip()
-    except Exception as e:
-        return f"[ERROR] {str(e)}"
+    global current_key_index, client, chat
+
+    max_retries = len(API_KEYS)
+    for attempt in range(max_retries):
+        try:
+            response = chat.send_message(prompt)
+            return response.text.strip()
+        except Exception as e:
+            err = str(e)
+            if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                print(f"  [LLM] Key [{current_key_index}] rate limit! Ganti key berikutnya...")
+                current_key_index = (current_key_index + 1) % len(API_KEYS)
+                client = _make_client(current_key_index)
+                chat = _make_chat(client)
+                print(f"  [LLM] Pakai key [{current_key_index}], tunggu 5 detik...")
+                time.sleep(5)
+            else:
+                return f"[ERROR] {err}"
+
+    return "[ERROR] Semua API key habis quota atau gagal."
